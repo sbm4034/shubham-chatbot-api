@@ -1,0 +1,7 @@
+__pycache__/
+.env
+*.log
+.vscode
+.node_modules
+.pakcage*.json
+.DS*
