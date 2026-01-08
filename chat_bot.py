@@ -10,6 +10,7 @@ import subprocess
 import json
 import os
 import httpx
+import re
 
 app = modal.App("llama-chat-bot")
 
@@ -20,7 +21,10 @@ gemma_image = (
     .run_commands(
     "curl -fsSL https://ollama.com/install.sh | sh"
     )
-
+)
+ollama_volume = modal.Volume.from_name(
+    "ollama-models",
+    create_if_missing=True
 )
 
 # Create Modal secret reference
@@ -49,60 +53,59 @@ web_app.add_middleware(
 )
 
 SYSTEM_PROMPT = """
-You are Shubham Rana, a real human software engineer.
+You are Shubham Rana.
 
-Identity:
-- You are NOT an AI assistant, chatbot, or model.
-- You speak as yourself, in first person.
-- If asked your name, reply: "My name is Shubham Rana."
+You are a real human software engineer.
+You are not an AI, assistant, or model.
 
-Background (true facts only):
-- I am a Senior Software Engineer with around 8 years of experience.
-- I primarily work on backend systems, microservices, and distributed applications.
-- My main programming languages are Java, Python, Go, and Vue.js.
-- I work extensively with cloud-native systems and APIs.
-- I have experience building healthcare and enterprise platforms.
-- I focus on performance, reliability, and clean system design.
+You must:
+- Speak in first person.
+- Answer only the question asked.
+- Use at most 2 sentences.
+- Never use bullet points or lists.
+- Never describe yourself as an AI.
+- Never mention training, knowledge, or capabilities.
 
-Important constraints:
-- Do NOT invent skills, tools, or projects.
-- Do NOT claim experience with Spark, Hadoop, Tableau, TensorFlow, Keras, or data science/ML projects.
-- Do NOT claim finance, stock prediction, or analytics projects.
-- If asked about something I have not done, say so honestly and briefly.
+Your background:
+- Senior software engineer (~8 years).
+- Backend, microservices, distributed systems.
+- Java, Python, Go, Vue.js.
+- Healthcare and enterprise systems.
 
-Conversation rules:
-- Respond naturally, like a human in a chat.
-- Answer only what is asked.
-- Keep replies short: 1–2 sentences unless the user explicitly asks for more detail.
-- Do not give résumé-style summaries unless explicitly requested.
-- If a question is vague, ask a short clarifying question instead.
+Projects you may mention:
+- HealthCareContentRecommendationService
+- airportinfo
+- AI_Projects_Experiments
+- shubhamrana
+- shubham-chatbot-api
 
-Tone:
-- Professional, calm, and conversational.
-- Honest and grounded, not promotional.
+If asked about anything else, say you have not worked on it.
 
-Contact information (true facts):
-- My primary contact method is the contact section on my website: https://shubhamrana.lovable.app
-- For professional networking, LinkedIn: https://www.linkedin.com/in/shubham4034/
-- For code and projects, GitHub: https://github.com/sbm4034/
-
-Contact rule:
-- Share contact information ONLY if the user asks how to reach me, contact me, hire me, or collaborate.
-- When asked, respond with 1 short sentence listing the relevant links.
-
-Confirmed projects and repositories:
-- HealthCareContentRecommendationService: A backend service I built that recommends healthcare content based on user needs, implemented with a Java Spring Boot API and Python FastAPI recommendation logic; the code and README describe its architecture and usage (GitHub link: https://github.com/sbm4034/HealthCareContentRecommendationService).
-- airportinfo: A project that provides airport information via simple API endpoints, with details and usage instructions in its README (GitHub link: https://github.com/sbm4034/airportinfo).
-- AI_Projects_Experiments: A collection of personal AI and machine learning experiment code demonstrating prototype models, toy projects, and exploratory implementations (GitHub link: https://github.com/sbm4034/AI_Projects_Experiments).
-- shubhamrana: A personal repository containing general code samples and portfolio materials related to my software engineering work (GitHub link: https://github.com/sbm4034/shubhamrana). 
-- chatbot repository: A repository for this current chatbot implementation with a role-based identity and streaming API using modal and Qwen , FastAPI and Python. (GitHub link: https://github.com/sbm4034/shubham-chatbot-api).
-
-Repository rule:
-- If the user links to any GitHub repository under https://github.com/sbm4034, treat it as one of my projects and respond using the relevant description above.
+If asked who you are, reply exactly:
+"My name is Shubham Rana."
 
 """
 
-MODEL="qwen2.5:7b"
+MODEL ="llama3.1:8b-instruct-q4_K_M"
+
+
+MAX_SENTENCES = 2
+
+INVALID_PHRASES = [
+    "as an ai",
+    "i am an ai",
+    "assistant",
+    "language model",
+    "trained on",
+    "my training data",
+]
+
+def violates_identity(text: str) -> bool:
+    t = text.lower()
+    return any(p in t for p in INVALID_PHRASES)
+
+
+
 def verify_api_key(request: Request):
     """Verify API key from request header"""
     api_key = request.headers.get("X-API-Key")
@@ -124,16 +127,81 @@ def get_last_user_message(messages):
 def get_prompt(messages, include_system=True):
     last_user = get_last_user_message(messages)
     if not last_user:
-        return "Please ask a question."
+        return "Ask a question."
 
-    parts = []
+    rewritten = rewrite_user_question(last_user)
+
+    identity_lock = (
+        "You are Shubham Rana. "
+        "You are speaking as yourself in first person. "
+        "Do not mention being an AI. "
+        "Keep answers to one or two sentences."
+    )
 
     if include_system:
-        parts.append(SYSTEM_PROMPT.strip())
+        return f"{SYSTEM_PROMPT}\n\n{identity_lock}\n\n{rewritten}"
 
-    parts.append(last_user)
+    return f"{identity_lock}\n\n{rewritten}"
 
-    return "\n\n".join(parts)
+
+def rewrite_user_question(q: str) -> str:
+    q_lower = q.lower()
+
+    if "skill" in q_lower:
+        return (
+            "Using only the facts below, answer in one short sentence.\n\n"
+            "Facts:\n"
+            "- Backend systems\n"
+            "- Microservices\n"
+            "- Distributed systems\n"
+            "- Java, Python, Go\n"
+            "- Healthcare and enterprise platforms\n\n"
+            "Do not add anything else."
+        )
+
+    if "who are you" in q_lower:
+        return "My name is Shubham Rana."
+
+    if "project" in q_lower:
+        return (
+            "Using only the following project names, answer in one short sentence:\n"
+            "HealthCareContentRecommendationService, airportinfo, shubham-chatbot-api."
+        )
+
+    return q
+
+
+
+def normalize_question(text: str) -> str:
+    replacements = {
+        "his ": "my ",
+        "him ": "me ",
+        "Shubham's ": "my ",
+        "Shubham’s ": "my ",
+    }
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+    return text
+
+
+def is_model_ready(model_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["ollama", "list"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        return model_name in result.stdout
+    except Exception:
+        return False
+
+
+def count_sentences(text: str) -> int:
+    return len(re.findall(r'[.!?]', text))
+
+def should_stop(text: str) -> bool:
+    return count_sentences(text) >= MAX_SENTENCES
 
 @web_app.post("/chat")
 @limiter.limit("10/minute")
@@ -145,7 +213,19 @@ async def chat_endpoint(request: Request):
     is_first_turn = len(messages) <= 1
     prompt = get_prompt(messages, include_system=is_first_turn)
 
+    if not is_model_ready(MODEL):
+        async def warming_up():
+            yield f"data: {json.dumps({'text': 'I’m warming up right now — please try again in a few seconds.'})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            warming_up(),
+            media_type="text/event-stream",
+        )
+    
     async def generate():
+       
+
         async with httpx.AsyncClient(timeout=None) as client:
             async with client.stream(
                 "POST",
@@ -154,21 +234,47 @@ async def chat_endpoint(request: Request):
                     "model": MODEL,
                     "prompt": prompt,
                     "stream": True,
-                    "temperature": 0.4,
-                    "top_p": 0.9,
-                    "num_predict": 200,
-                    "repeat_penalty": 1.05
+                    "temperature": 0.2,
+                    "top_p": 0.85,
+                    "num_predict": 40,
+                    "repeat_penalty": 1.15
                 }
             ) as response:
+                accumulated_text = ""
+
                 async for line in response.aiter_lines():
                     if not line:
                         continue
+
                     data = json.loads(line)
-                    if "response" in data:
-                        yield f"data: {json.dumps({'text': data['response']})}\n\n"
+
+                    if data.get("response"):
+                        token = data["response"]
+                        accumulated_text += token
+
+                        if "\n1." in accumulated_text or "\n•" in accumulated_text:
+                            yield "data: [DONE]\n\n"
+                            return
+                        
+                        if violates_identity(accumulated_text):
+                            yield f"data: {json.dumps({'text': 'My name is Shubham Rana.'})}\n\n"
+                            yield "data: [DONE]\n\n"
+                            return
+                        
+                        if not violates_identity(accumulated_text):
+                            yield f"data: {json.dumps({'text': token})}\n\n"
+
+                        
+                        if should_stop(accumulated_text):
+                            yield "data: [DONE]\n\n"
+                            return
+
+                    if data.get("done"):
+                        break
 
         yield "data: [DONE]\n\n"
 
+    
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -196,15 +302,24 @@ async def chat_simple(request: Request):
                 "model":MODEL,
                 "prompt": prompt,
                 "stream": False,
-                "temperature": 0.4,
-                "top_p": 0.9,
-                "num_predict": 200,
-                "repeat_penalty": 1.05
+                "temperature": 0.2,
+                "top_p": 0.85,
+                "num_predict": 40,
+                "repeat_penalty": 1.15
             },
             timeout=60
         )
-
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ollama error: {resp.text}"
+    )
     data = resp.json()
+    if not data.get("response"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"No response from model: {data}"
+    )
     return {
         "response": data.get("response", "").strip(),
         "model": MODEL
@@ -228,12 +343,12 @@ async def health(request: Request):
 @app.function(
     image=gemma_image,
     secrets=[chatbot_secret],
-    ephemeral_disk=3145728,
+    volumes={"/root/.ollama": ollama_volume},
     cpu=2.0,
     memory=4096,
     scaledown_window=1800,
     timeout=600,
-    max_containers=5,
+    max_containers=2,
 )
 @modal.asgi_app()
 def serve():
@@ -247,15 +362,23 @@ def serve():
         stderr=subprocess.PIPE
     )
 
-    
-    time.sleep(5)
+    for _ in range(30):
+        try:
+            httpx.get("http://127.0.0.1:11434")
+            break
+        except Exception:
+            time.sleep(1)
 
-    print("Pulling model at runtime...")
+    print("Pulling model...")
+    subprocess.run(["ollama", "pull", MODEL], check=True)
+
     subprocess.run(
-        ["ollama", "pull", MODEL],
-        check=False
+    ["ollama", "run", MODEL, "Say OK"],
+    capture_output=True,
+    timeout=30
     )
 
     print("Ollama ready.")
     return web_app
+
 
